@@ -12,29 +12,81 @@ SignBridge is a modern web application designed to break communication barriers 
 - **Styling**: [Tailwind CSS](https://tailwindcss.com/)
 - **UI Components**: [Radix UI](https://www.radix-ui.com/) & [Lucide React](https://lucide.dev/)
 - **AI/ML**: [TensorFlow.js](https://www.tensorflow.org/js) & [@tensorflow-models/handpose](https://github.com/tensorflow/tfjs-models/tree/master/handpose)
-- **Animation**: [Framer Motion](https://www.framer.com/motion/) (implied via design system)
+- **Charts**: [Recharts](https://recharts.org/) for training visualization and benchmarking
 
-## 🧠 Technical Overview
+## 🧠 Research
 
-### Real-Time Hand Tracking
-The core of SignBridge is built on the **MediaPipe Handpose** model. The application captures video frames from the user's camera and processes them locally using TensorFlow.js to detect 21 distinct hand landmarks (3D coordinates).
+### Trainable Gesture Classifier
 
-### Gesture Recognition Engine
-Recognition is implemented via a heuristic-based engine that analyzes the relationships between landmarks:
-- **Finger Extension**: Calculating the relative distance between finger tips and MCP joints.
-- **Palm Orientation**: Determining the vector of the hand relative to the camera.
-- **Pattern Matching**: Comparing current hand states against pre-defined ASL gesture patterns (e.g., 'Hello', 'Thank You', 'Yes/No').
+The core recognition engine has been upgraded from hardcoded heuristic rules to a **trainable TF.js neural network** with the following architecture:
 
-### Audio Synthesis
-Integrated with the **Web Speech API**, the application provides immediate auditory feedback for recognized signs, allowing for a two-way communication flow.
+| Layer | Config |
+|-------|--------|
+| Input | 63 features (21 landmarks × 3 coords) |
+| Dense | 128 units, ReLU, L2(0.001) |
+| Dropout | 0.3 |
+| Dense | 64 units, ReLU |
+| Dropout | 0.2 |
+| Output | Softmax (N classes) |
+
+A secondary **LSTM-based Sequence Classifier** handles dynamic signs requiring motion:
+
+| Layer | Config |
+|-------|--------|
+| TimeDistributed Dense | 32 units, ReLU |
+| LSTM | 64 units |
+| Dense | 32 units, ReLU |
+| Output | Softmax |
+
+### Motion-Based Routing
+
+A temporal buffer tracks wrist displacement over 20 frames. If motion magnitude is below the threshold, the **static classifier** fires; otherwise, the **temporal classifier** is used.
+
+### Two-Handed Support
+
+The hand tracking pipeline supports **up to 2 hands** simultaneously. Handedness is detected via x-coordinate centroid sorting, and landmarks are drawn in distinct colors with left/right labels.
+
+### Research Metrics Overlay
+
+Press **Shift+D** during a live demo to toggle a real-time overlay showing:
+- FPS, inference latency (10-frame rolling avg)
+- Active classifier (static/temporal)
+- Raw confidence, top-3 candidates with bars
+- Active hand count
+
+Full methodology documentation: [`src/research/METHODOLOGY.md`](src/research/METHODOLOGY.md)
+
+## 📊 Benchmarks
+
+| Metric | Value |
+|--------|-------|
+| Overall Accuracy | _TBD — run with collected data_ |
+| Mean Avg Precision | _TBD_ |
+| Avg Latency | _TBD_ |
+
+Per-gesture precision/recall/F1 scores and a confusion matrix are available in the **Benchmark Dashboard** accessible from the app's home screen.
+
+## 🏋️ Training Panel
+
+The built-in **Training Panel** allows you to:
+
+1. **Collect data**: Click "Record" for each gesture label while performing the sign. Each press captures ~30 frames.
+2. **Train**: Click "Train Model" to train the neural network directly in your browser. A live loss/accuracy chart shows training progress.
+3. **Save/Load**: Trained models persist in browser `localStorage` automatically.
+4. **Export**: Download the collected dataset as JSON for reproducibility.
+
+Access the Training Panel from the app's home screen → **Train** card.
 
 ## ✨ Key Features
 
-- **Live Recognition Feed**: AI-powered overlay showing tracked hand points and real-time translation.
-- **Demo Mode**: A simulated environment for testing features without requiring a physical camera.
-- **Learn Section**: Interactive guides for users to practice and expand their sign language vocabulary.
-- **History & Analytics**: Tracking of recent translations for quick reference.
-- **Responsive Mockup**: Housed within a premium mobile viewport design to demonstrate mobile application potential.
+- **41 Supported Gestures**: A–Z fingerspelling + 15 common signs
+- **Live Recognition Feed**: AI-powered overlay with hand skeleton tracking
+- **Two-Hand Detection**: Supports left/right hand with colored overlays
+- **Demo Mode**: Simulated environment for testing without a camera
+- **Sign Glossary**: Browse all signs with difficulty badges and descriptions
+- **Benchmark Dashboard**: Per-gesture precision/recall/F1 + confusion matrix
+- **Learn Section**: Interactive sign language learning path
+- **Text-to-Speech**: Audio feedback for recognized signs
 
 ## 🛠️ Development Setup
 

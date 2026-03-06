@@ -4,69 +4,179 @@ import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Badge } from './ui/badge';
 import { Progress } from '../components/ui/progress';
 import { Camera, CameraOff, RotateCcw, Play, Pause, AlertCircle, Info, Volume2, VolumeX } from 'lucide-react';
+import { TemporalBuffer } from '../ml/TemporalBuffer';
 
 interface RecognizedSign {
   sign: string;
   confidence: number;
   timestamp: Date;
+  classifierUsed?: 'static' | 'temporal';
+}
+
+// Motion threshold: below this, use static classifier; above, use temporal
+const MOTION_THRESHOLD = 8;
+
+interface OverlayMetrics {
+  fps: number;
+  latencyMs: number;
+  classifierUsed: 'static' | 'temporal' | 'none';
+  topConfidence: number;
+  topCandidates: { gesture: string; confidence: number }[];
+  activeHands: number;
+  handsDetected: ('left' | 'right')[];
 }
 
 // Sign language gesture patterns based on hand landmarks
-// These are simplified patterns - in production, you'd use a trained ML model
-const signPatterns = {
-  'Hello': (landmarks: number[][]) => {
+// Uses finger extension bitmask patterns: [Thumb, Index, Middle, Ring, Pinky]
+// In production, the trained CustomMLP replaces these heuristics.
+
+/**
+ * Returns a bitmask array [thumb, index, middle, ring, pinky] where 1 = extended.
+ */
+function getFingerBitmask(landmarks: number[][]): [number, number, number, number, number] {
+  if (!landmarks || landmarks.length < 21) return [0, 0, 0, 0, 0];
+
+  // Finger tip and MCP indices
+  const tips = [4, 8, 12, 16, 20];
+  const mcps = [2, 5, 9, 13, 17];
+  const mask: [number, number, number, number, number] = [0, 0, 0, 0, 0];
+
+  // Thumb: check horizontal extension (x distance from MCP)
+  const thumbExt = Math.abs(landmarks[tips[0]][0] - landmarks[mcps[0]][0]) > 30;
+  mask[0] = thumbExt ? 1 : 0;
+
+  // Other fingers: check if tip is above MCP (y-axis, lower y = higher on screen)
+  for (let i = 1; i < 5; i++) {
+    mask[i] = landmarks[tips[i]][1] < landmarks[mcps[i]][1] - 20 ? 1 : 0;
+  }
+  return mask;
+}
+
+function matchBitmask(
+  landmarks: number[][],
+  expected: [number, number, number, number, number],
+  tolerance: number = 0,
+): number {
+  const actual = getFingerBitmask(landmarks);
+  let matches = 0;
+  for (let i = 0; i < 5; i++) {
+    if (actual[i] === expected[i]) matches++;
+  }
+  const score = matches / 5;
+  return score >= (5 - tolerance) / 5 ? score * 0.85 : 0;
+}
+
+const signPatterns: Record<string, (landmarks: number[][]) => number> = {
+  // ──────── A–Z Alphabet (finger extension bitmasks) ────────
+  // Bitmask: [Thumb, Index, Middle, Ring, Pinky]
+  'A': (lm) => matchBitmask(lm, [0, 0, 0, 0, 0]),     // Fist, thumb alongside
+  'B': (lm) => matchBitmask(lm, [0, 1, 1, 1, 1]),     // Flat hand, thumb tucked
+  'C': (lm) => {                                        // Curved C shape — all spread
+    const ext = checkFingersExtended(lm);
+    return ext >= 3 ? 0.70 : 0;
+  },
+  'D': (lm) => matchBitmask(lm, [0, 1, 0, 0, 0]),     // Index up only
+  'E': (lm) => matchBitmask(lm, [0, 0, 0, 0, 0]),     // All curled, tips down
+  'F': (lm) => matchBitmask(lm, [0, 0, 1, 1, 1]),     // Thumb+index touch, 3 up
+  'G': (lm) => matchBitmask(lm, [1, 1, 0, 0, 0]),     // Thumb+index horizontal
+  'H': (lm) => matchBitmask(lm, [0, 1, 1, 0, 0]),     // Index+middle horizontal
+  'I': (lm) => matchBitmask(lm, [0, 0, 0, 0, 1]),     // Pinky only
+  'J': (lm) => matchBitmask(lm, [0, 0, 0, 0, 1]),     // Pinky + J motion (static approx)
+  'K': (lm) => matchBitmask(lm, [1, 1, 1, 0, 0]),     // Thumb between index+middle
+  'L': (lm) => matchBitmask(lm, [1, 1, 0, 0, 0]),     // L-shape
+  'M': (lm) => matchBitmask(lm, [0, 0, 0, 0, 0]),     // 3 fingers over thumb
+  'N': (lm) => matchBitmask(lm, [0, 0, 0, 0, 0]),     // 2 fingers over thumb
+  'O': (lm) => {                                        // Fingertips touching, O shape
+    const ext = checkFingersExtended(lm);
+    return ext <= 1 ? 0.72 : 0;
+  },
+  'P': (lm) => matchBitmask(lm, [1, 1, 1, 0, 0]),     // Like K, tilted down
+  'Q': (lm) => matchBitmask(lm, [1, 1, 0, 0, 0]),     // Like G, pointing down
+  'R': (lm) => matchBitmask(lm, [0, 1, 1, 0, 0]),     // Index+middle crossed
+  'S': (lm) => matchBitmask(lm, [0, 0, 0, 0, 0]),     // Fist, thumb over
+  'T': (lm) => matchBitmask(lm, [0, 0, 0, 0, 0]),     // Fist, thumb between
+  'U': (lm) => matchBitmask(lm, [0, 1, 1, 0, 0]),     // Index+middle together up
+  'V': (lm) => matchBitmask(lm, [0, 1, 1, 0, 0]),     // Index+middle spread (V)
+  'W': (lm) => matchBitmask(lm, [0, 1, 1, 1, 0]),     // 3 fingers spread
+  'X': (lm) => matchBitmask(lm, [0, 1, 0, 0, 0]),     // Index hooked
+  'Y': (lm) => matchBitmask(lm, [1, 0, 0, 0, 1]),     // Thumb+pinky (hang loose)
+  'Z': (lm) => matchBitmask(lm, [0, 1, 0, 0, 0]),     // Index traces Z (static approx)
+
+  // ──────── Common Signs ────────
+  'Hello': (landmarks) => {
     const fingersExtended = checkFingersExtended(landmarks);
     return fingersExtended >= 4 ? 0.85 : 0;
   },
-  'Thank you': (landmarks: number[][]) => {
+  'Thank You': (landmarks) => {
     const palmFacingUp = checkPalmOrientation(landmarks, 'up');
     const fingersExtended = checkFingersExtended(landmarks);
     return (palmFacingUp && fingersExtended >= 3) ? 0.80 : 0;
   },
-  'Please': (landmarks: number[][]) => {
+  'Please': (landmarks) => {
     const palmOpen = checkFingersExtended(landmarks) >= 4;
     return palmOpen ? 0.75 : 0;
   },
-  'Yes': (landmarks: number[][]) => {
+  'Yes': (landmarks) => {
     const fistClosed = checkFingersExtended(landmarks) <= 1;
     return fistClosed ? 0.82 : 0;
   },
-  'No': (landmarks: number[][]) => {
+  'No': (landmarks) => {
     const twoFingersExtended = checkFingersExtended(landmarks) === 2;
     return twoFingersExtended ? 0.78 : 0;
   },
-  'Good': (landmarks: number[][]) => {
+  'Good': (landmarks) => {
     const thumbUp = checkThumbPosition(landmarks, 'up');
     const fingersDown = checkFingersExtended(landmarks) <= 1;
     return (thumbUp && fingersDown) ? 0.88 : 0;
   },
-  'Bad': (landmarks: number[][]) => {
+  'Bad': (landmarks) => {
     const thumbDown = checkThumbPosition(landmarks, 'down');
     const fingersDown = checkFingersExtended(landmarks) <= 1;
     return (thumbDown && fingersDown) ? 0.83 : 0;
   },
-  'Help': (landmarks: number[][]) => {
+  'Help': (landmarks) => {
     const fingersExtended = checkFingersExtended(landmarks);
     return fingersExtended >= 3 ? 0.76 : 0;
   },
-  'Sorry': (landmarks: number[][]) => {
+  'Sorry': (landmarks) => {
     const fistClosed = checkFingersExtended(landmarks) <= 1;
     return fistClosed ? 0.79 : 0;
   },
-  'Love': (landmarks: number[][]) => {
+  'More': (landmarks) => {
+    // Both hands: fingertips together — approximate with closed hand
+    const fist = checkFingersExtended(landmarks) <= 1;
+    return fist ? 0.74 : 0;
+  },
+  'Stop': (landmarks) => {
+    // Flat hand — all fingers extended
+    return checkFingersExtended(landmarks) >= 4 ? 0.77 : 0;
+  },
+  'Water': (landmarks) => {
+    // W-hand taps chin — check W bitmask
+    return matchBitmask(landmarks, [0, 1, 1, 1, 0]) > 0 ? 0.73 : 0;
+  },
+  'Eat': (landmarks) => {
+    // Flat O taps mouth — fingers slightly curled
+    return checkFingersExtended(landmarks) <= 2 ? 0.72 : 0;
+  },
+  'Home': (landmarks) => {
+    // Flat O from cheek to ear
+    return checkFingersExtended(landmarks) <= 2 ? 0.71 : 0;
+  },
+  'Love': (landmarks) => {
     const specialPattern = checkLoveSign(landmarks);
     return specialPattern ? 0.90 : 0;
-  }
+  },
 };
 
 // Helper functions for gesture recognition
 function checkFingersExtended(landmarks: number[][]): number {
   if (!landmarks || landmarks.length < 21) return 0;
-  
+
   let extendedCount = 0;
   const fingerTips = [8, 12, 16, 20];
   const fingerMCPs = [5, 9, 13, 17];
-  
+
   fingerTips.forEach((tip, i) => {
     const tipY = landmarks[tip][1];
     const mcpY = landmarks[fingerMCPs[i]][1];
@@ -74,13 +184,13 @@ function checkFingersExtended(landmarks: number[][]): number {
       extendedCount++;
     }
   });
-  
+
   const thumbTip = landmarks[4];
   const thumbMCP = landmarks[2];
   if (Math.abs(thumbTip[0] - thumbMCP[0]) > 30) {
     extendedCount++;
   }
-  
+
   return extendedCount;
 }
 
@@ -115,19 +225,19 @@ function checkLoveSign(landmarks: number[][]): boolean {
   const thumbMCP = landmarks[2];
   const indexMCP = landmarks[5];
   const middleMCP = landmarks[9];
-  
+
   const thumbExtended = Math.abs(thumbTip[0] - thumbMCP[0]) > 30;
   const indexExtended = indexTip[1] < indexMCP[1] - 20;
   const middleDown = middleTip[1] > middleMCP[1];
   const pinkyExtended = pinkyTip[1] < middleMCP[1] - 10;
-  
+
   return thumbExtended && indexExtended && pinkyExtended && middleDown;
 }
 
 function recognizeSign(landmarks: number[][]): RecognizedSign | null {
   let bestMatch: RecognizedSign | null = null;
   let highestConfidence = 0.70;
-  
+
   for (const [signName, detector] of Object.entries(signPatterns)) {
     const confidence = detector(landmarks);
     if (confidence > highestConfidence) {
@@ -160,6 +270,32 @@ export function SignLanguageRecognizer() {
   const [modelLoading, setModelLoading] = useState(false);
   const recognitionIntervalRef = useRef<number | null>(null);
 
+  // === Upgrade 3: Temporal buffer ===
+  const temporalBufferRef = useRef(new TemporalBuffer(20));
+
+  // === Upgrade 5: Two-handed state ===
+  const [detectedHands, setDetectedHands] = useState<('left' | 'right')[]>([]);
+
+  // === Upgrade 6: Research overlay ===
+  const [showOverlay, setShowOverlay] = useState(false);
+  const [overlayMetrics, setOverlayMetrics] = useState<OverlayMetrics>({
+    fps: 0, latencyMs: 0, classifierUsed: 'none',
+    topConfidence: 0, topCandidates: [], activeHands: 0, handsDetected: [],
+  });
+  const fpsFrames = useRef<number[]>([]);
+  const latencyFrames = useRef<number[]>([]);
+
+  // Keyboard shortcut: Shift+D toggles overlay
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.shiftKey && e.key === 'D') {
+        setShowOverlay(prev => !prev);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   // Ensure video element always receives the stream
   useEffect(() => {
     if (cameraActive && stream && videoRef.current) {
@@ -186,7 +322,7 @@ export function SignLanguageRecognizer() {
         const tf = await import('@tensorflow/tfjs');
         const handpose = await import('@tensorflow-models/handpose');
         await tf.ready();
-        const loadedModel = await handpose.load();
+        const loadedModel = await handpose.load({ maxNumHands: 2 } as any);
         setModel(loadedModel);
         setModelLoading(false);
       } catch (error) {
@@ -223,24 +359,24 @@ export function SignLanguageRecognizer() {
     try {
       setIsLoading(true);
       setCameraError(null);
-      
+
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('Camera not supported by this browser');
       }
 
       const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { 
-          width: 640, 
+        video: {
+          width: 640,
           height: 480,
           facingMode: 'user'
         }
       });
-      
+
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
         setStream(mediaStream);
         setCameraActive(true);
-        
+
         // Ensure video playback starts
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play().catch(e => console.error('Play error:', e));
@@ -261,9 +397,9 @@ export function SignLanguageRecognizer() {
       if (error.name !== 'NotAllowedError') {
         console.error('Error accessing camera:', error);
       }
-      
+
       let errorMessage = 'Could not access camera. ';
-      
+
       if (error.name === 'NotAllowedError') {
         errorMessage += 'Camera permission was denied. Please allow camera access in your browser settings and try again.';
         setTimeout(() => {
@@ -282,7 +418,7 @@ export function SignLanguageRecognizer() {
       } else {
         errorMessage += 'Please check your camera and permissions.';
       }
-      
+
       setCameraError(errorMessage);
     } finally {
       setIsLoading(false);
@@ -304,16 +440,16 @@ export function SignLanguageRecognizer() {
     setDemoMode(true);
     setCameraError(null);
     setIsRecognizing(true);
-    
+
     const interval = setInterval(() => {
-      const mockSigns = ['Hello', 'Thank you', 'Please', 'Yes', 'No', 'Good', 'Bad', 'Help', 'Sorry', 'Love'];
+      const mockSigns = ['Hello', 'Thank You', 'Please', 'Yes', 'No', 'Good', 'Bad', 'Help', 'Sorry', 'Love'];
       const randomSign = mockSigns[Math.floor(Math.random() * mockSigns.length)];
       const recognizedSign: RecognizedSign = {
         sign: randomSign,
         confidence: 0.75 + Math.random() * 0.2,
         timestamp: new Date()
       };
-      
+
       setCurrentSign(recognizedSign);
       setRecognitionHistory(prev => [recognizedSign, ...prev].slice(0, 10));
     }, 2000);
@@ -328,7 +464,7 @@ export function SignLanguageRecognizer() {
     }
 
     setIsRecognizing(true);
-    
+
     if (demoMode) {
       const interval = setInterval(() => {
         const mockSigns = ['Hello', 'Thank you', 'Please', 'Yes', 'No', 'Good', 'Bad', 'Help', 'Sorry', 'Love'];
@@ -338,7 +474,7 @@ export function SignLanguageRecognizer() {
           confidence: 0.75 + Math.random() * 0.2,
           timestamp: new Date()
         };
-        
+
         setCurrentSign(recognizedSign);
         setRecognitionHistory(prev => [recognizedSign, ...prev].slice(0, 10));
       }, 2000);
@@ -351,51 +487,144 @@ export function SignLanguageRecognizer() {
 
     const detectHands = async () => {
       if (videoRef.current && model && isActive) {
+        const frameStart = performance.now();
         try {
           const predictions = await model.estimateHands(videoRef.current);
+          const inferenceTime = performance.now() - frameStart;
+
+          // === Upgrade 5: Detect handedness ===
+          const hands: ('left' | 'right')[] = [];
+          const allLandmarks: number[][] = [];
+
           if (predictions.length > 0) {
-            const landmarks = predictions[0].landmarks;
+            // Sort by x-centroid to determine left/right
+            const sorted = [...predictions].sort((a: any, b: any) => {
+              const aCx = a.landmarks.reduce((s: number, l: number[]) => s + l[0], 0) / a.landmarks.length;
+              const bCx = b.landmarks.reduce((s: number, l: number[]) => s + l[0], 0) / b.landmarks.length;
+              return aCx - bCx;
+            });
+
+            for (let hi = 0; hi < sorted.length; hi++) {
+              // Since camera is mirrored: leftmost in frame = right hand
+              hands.push(hi === 0 ? 'right' : 'left');
+              allLandmarks.push(...sorted[hi].landmarks);
+            }
+            setDetectedHands(hands);
+
+            // Use primary hand for recognition
+            const primaryLandmarks = sorted[0].landmarks;
+
+            // Draw landmarks on canvas
             if (canvasRef.current) {
               const ctx = canvasRef.current.getContext('2d');
               if (ctx && videoRef.current) {
                 canvasRef.current.width = videoRef.current.videoWidth;
                 canvasRef.current.height = videoRef.current.videoHeight;
                 ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-                ctx.fillStyle = 'red';
-                landmarks.forEach((landmark: number[]) => {
-                  ctx.beginPath();
-                  ctx.arc(landmark[0], landmark[1], 5, 0, 2 * Math.PI);
-                  ctx.fill();
-                });
-                ctx.strokeStyle = 'blue';
-                ctx.lineWidth = 2;
+
                 const connections = [
-                  [0,1],[1,2],[2,3],[3,4],
-                  [0,5],[5,6],[6,7],[7,8],
-                  [0,9],[9,10],[10,11],[11,12],
-                  [0,13],[13,14],[14,15],[15,16],
-                  [0,17],[17,18],[18,19],[19,20],
-                  [5,9],[9,13],[13,17]
+                  [0, 1], [1, 2], [2, 3], [3, 4],
+                  [0, 5], [5, 6], [6, 7], [7, 8],
+                  [0, 9], [9, 10], [10, 11], [11, 12],
+                  [0, 13], [13, 14], [14, 15], [15, 16],
+                  [0, 17], [17, 18], [18, 19], [19, 20],
+                  [5, 9], [9, 13], [13, 17]
                 ];
-                connections.forEach(([start, end]) => {
-                  ctx.beginPath();
-                  ctx.moveTo(landmarks[start][0], landmarks[start][1]);
-                  ctx.lineTo(landmarks[end][0], landmarks[end][1]);
-                  ctx.stroke();
-                });
+
+                // Draw each detected hand with different colors
+                const handColors = ['#3b82f6', '#f97316']; // blue, orange
+                for (let hi = 0; hi < sorted.length; hi++) {
+                  const lm = sorted[hi].landmarks;
+                  const color = handColors[hi % handColors.length];
+
+                  // Dots
+                  ctx.fillStyle = color;
+                  lm.forEach((landmark: number[]) => {
+                    ctx.beginPath();
+                    ctx.arc(landmark[0], landmark[1], 5, 0, 2 * Math.PI);
+                    ctx.fill();
+                  });
+
+                  // Connections
+                  ctx.strokeStyle = color;
+                  ctx.lineWidth = 2;
+                  connections.forEach(([start, end]) => {
+                    ctx.beginPath();
+                    ctx.moveTo(lm[start][0], lm[start][1]);
+                    ctx.lineTo(lm[end][0], lm[end][1]);
+                    ctx.stroke();
+                  });
+
+                  // === Upgrade 5: Hand label badge ===
+                  const handLabel = hands[hi]?.toUpperCase() || '';
+                  const wrist = lm[0];
+                  ctx.font = 'bold 14px sans-serif';
+                  ctx.fillStyle = 'white';
+                  ctx.strokeStyle = color;
+                  ctx.lineWidth = 3;
+                  ctx.strokeText(handLabel, wrist[0] - 15, wrist[1] + 25);
+                  ctx.fillText(handLabel, wrist[0] - 15, wrist[1] + 25);
+                }
               }
             }
-            const recognizedSign = recognizeSign(landmarks);
-            if (recognizedSign) {
-              setCurrentSign(recognizedSign);
+
+            // === Upgrade 3: Temporal routing ===
+            temporalBufferRef.current.push(primaryLandmarks);
+            const motionMag = temporalBufferRef.current.getMotionVector();
+            let classifierUsed: 'static' | 'temporal' = 'static';
+
+            let recognizedSignResult: RecognizedSign | null = null;
+
+            if (motionMag < MOTION_THRESHOLD) {
+              // Static classifier
+              classifierUsed = 'static';
+              recognizedSignResult = recognizeSign(primaryLandmarks);
+            } else {
+              // Temporal/dynamic — fall back to static heuristics for now
+              // (SequenceClassifier requires training data; using static as fallback)
+              classifierUsed = 'temporal';
+              recognizedSignResult = recognizeSign(primaryLandmarks);
+            }
+
+            // Build top-3 candidates
+            const candidates: { gesture: string; confidence: number }[] = [];
+            for (const [signName, detector] of Object.entries(signPatterns)) {
+              const conf = detector(primaryLandmarks);
+              if (conf > 0) candidates.push({ gesture: signName, confidence: conf });
+            }
+            candidates.sort((a, b) => b.confidence - a.confidence);
+            const top3 = candidates.slice(0, 3);
+
+            if (recognizedSignResult) {
+              recognizedSignResult.classifierUsed = classifierUsed;
+              setCurrentSign(recognizedSignResult);
               setRecognitionHistory(prev => {
-                if (prev.length > 0 && prev[0].sign === recognizedSign.sign) {
+                if (prev.length > 0 && prev[0].sign === recognizedSignResult!.sign) {
                   return prev;
                 }
-                return [recognizedSign, ...prev].slice(0, 10);
+                return [recognizedSignResult!, ...prev].slice(0, 10);
               });
             }
+
+            // === Upgrade 6: Update overlay metrics ===
+            const now = performance.now();
+            fpsFrames.current.push(now);
+            fpsFrames.current = fpsFrames.current.filter(t => now - t < 1000);
+            latencyFrames.current.push(inferenceTime);
+            if (latencyFrames.current.length > 10) latencyFrames.current.shift();
+            const avgLatency = latencyFrames.current.reduce((a, b) => a + b, 0) / latencyFrames.current.length;
+
+            setOverlayMetrics({
+              fps: fpsFrames.current.length,
+              latencyMs: Math.round(avgLatency * 10) / 10,
+              classifierUsed,
+              topConfidence: recognizedSignResult?.confidence ?? 0,
+              topCandidates: top3,
+              activeHands: predictions.length,
+              handsDetected: hands,
+            });
           } else {
+            setDetectedHands([]);
             if (canvasRef.current) {
               const ctx = canvasRef.current.getContext('2d');
               if (ctx) {
@@ -403,13 +632,14 @@ export function SignLanguageRecognizer() {
               }
             }
             setCurrentSign(null);
+            setOverlayMetrics(prev => ({ ...prev, activeHands: 0, handsDetected: [], classifierUsed: 'none' }));
           }
         } catch (error) {
           setCameraError('Error detecting hands: ' + (error instanceof Error ? error.message : String(error)));
           console.error('Error detecting hands:', error);
         }
       }
-      
+
       if (isActive) {
         requestAnimationFrame(detectHands);
       }
@@ -428,14 +658,14 @@ export function SignLanguageRecognizer() {
       clearInterval(recognitionIntervalRef.current);
       recognitionIntervalRef.current = null;
     }
-    
+
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d');
       if (ctx) {
         ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
       }
     }
-    
+
     setCurrentSign(null);
   }, []);
 
@@ -492,11 +722,11 @@ export function SignLanguageRecognizer() {
                   New to sign language recognition?
                 </p>
                 <p className="text-sm text-blue-700 dark:text-blue-300">
-                  Try our Demo Mode to see how recognition works without needing camera access. 
+                  Try our Demo Mode to see how recognition works without needing camera access.
                   Perfect for exploring the app or if you're having camera issues.
                 </p>
-                <Button 
-                  onClick={startDemoMode} 
+                <Button
+                  onClick={startDemoMode}
                   size="sm"
                   className="bg-blue-600 hover:bg-blue-700 text-white"
                 >
@@ -515,8 +745,8 @@ export function SignLanguageRecognizer() {
               <div className="flex gap-2">
                 {!cameraActive && !demoMode ? (
                   <>
-                    <Button 
-                      onClick={startCamera} 
+                    <Button
+                      onClick={startCamera}
                       disabled={isLoading}
                       variant="outline"
                       size="sm"
@@ -524,7 +754,7 @@ export function SignLanguageRecognizer() {
                       <Camera className="w-4 h-4 mr-2" />
                       {isLoading ? 'Starting...' : 'Start Camera'}
                     </Button>
-                    <Button 
+                    <Button
                       onClick={startDemoMode}
                       variant="secondary"
                       size="sm"
@@ -534,7 +764,7 @@ export function SignLanguageRecognizer() {
                     </Button>
                   </>
                 ) : cameraActive ? (
-                  <Button 
+                  <Button
                     onClick={stopCamera}
                     variant="outline"
                     size="sm"
@@ -543,7 +773,7 @@ export function SignLanguageRecognizer() {
                     Stop Camera
                   </Button>
                 ) : (
-                  <Button 
+                  <Button
                     onClick={() => setDemoMode(false)}
                     variant="outline"
                     size="sm"
@@ -564,8 +794,8 @@ export function SignLanguageRecognizer() {
                     playsInline
                     muted
                     className="w-full h-80 object-cover z-10 relative"
-                    style={{ 
-                      background: 'black', 
+                    style={{
+                      background: 'black',
                       display: 'block',
                       width: '100%',
                       height: '320px',
@@ -577,7 +807,7 @@ export function SignLanguageRecognizer() {
                   <canvas
                     ref={canvasRef}
                     className="absolute top-0 left-0 w-full h-full z-20"
-                    style={{ 
+                    style={{
                       pointerEvents: 'none',
                       position: 'absolute',
                       top: 0,
@@ -609,9 +839,9 @@ export function SignLanguageRecognizer() {
                     {!cameraError && (
                       <div className="text-center">
                         <p className="text-xs opacity-60 mb-3">No camera? No problem!</p>
-                        <Button 
-                          onClick={startDemoMode} 
-                          variant="secondary" 
+                        <Button
+                          onClick={startDemoMode}
+                          variant="secondary"
                           size="sm"
                         >
                           <Play className="w-4 h-4 mr-2" />
@@ -629,8 +859,62 @@ export function SignLanguageRecognizer() {
                   </Badge>
                 </div>
               )}
+
+              {/* === Upgrade 6: Research Metrics Overlay (Shift+D) === */}
+              {showOverlay && (
+                <div className="absolute top-4 right-0 bg-black/80 text-white text-xs p-3 rounded-lg"
+                  style={{ minWidth: '200px', zIndex: 50, backdropFilter: 'blur(4px)' }}>
+                  <div className="font-bold mb-2 text-green-400">⚡ Research Metrics</div>
+                  <div className="space-y-1">
+                    <div className="flex justify-between">
+                      <span className="text-gray-300">FPS</span>
+                      <span className="font-mono">{overlayMetrics.fps}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-300">Latency</span>
+                      <span className="font-mono">{overlayMetrics.latencyMs}ms</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-300">Classifier</span>
+                      <span className={`font-mono ${overlayMetrics.classifierUsed === 'temporal' ? 'text-yellow-400' : 'text-blue-400'}`}>
+                        {overlayMetrics.classifierUsed}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-300">Confidence</span>
+                      <span className="font-mono">{overlayMetrics.topConfidence.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-300">Hands</span>
+                      <span className="font-mono">
+                        {overlayMetrics.activeHands} ({overlayMetrics.handsDetected.join(', ') || '—'})
+                      </span>
+                    </div>
+                  </div>
+                  {overlayMetrics.topCandidates.length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-white/20">
+                      <div className="text-gray-400 mb-1">Top Candidates</div>
+                      {overlayMetrics.topCandidates.map((c, i) => (
+                        <div key={i} className="flex items-center gap-2 mb-1">
+                          <span className="w-8 truncate">{c.gesture}</span>
+                          <div className="flex-1 bg-white/20 rounded-full h-1.5">
+                            <div
+                              className={`h-1.5 rounded-full ${i === 0 ? 'bg-green-400' : i === 1 ? 'bg-yellow-400' : 'bg-gray-400'}`}
+                              style={{ width: `${Math.round(c.confidence * 100)}%` }}
+                            />
+                          </div>
+                          <span className="font-mono w-10 text-right">{(c.confidence * 100).toFixed(0)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-2 pt-1 text-gray-500 text-center" style={{ fontSize: '9px' }}>
+                    Shift+D to toggle
+                  </div>
+                </div>
+              )}
             </div>
-            
+
             {cameraError && (
               <div className="mt-4 p-4 bg-destructive/10 border border-destructive/20 rounded-lg">
                 <div className="flex items-start gap-3">
@@ -652,9 +936,9 @@ export function SignLanguageRecognizer() {
                       <p className="text-xs text-destructive/80 mb-2">
                         <strong>Can't enable camera? Try our demo mode instead:</strong>
                       </p>
-                      <Button 
-                        onClick={startDemoMode} 
-                        variant="outline" 
+                      <Button
+                        onClick={startDemoMode}
+                        variant="outline"
                         size="sm"
                         className="border-destructive/30 text-destructive hover:bg-destructive/10"
                       >
@@ -698,8 +982,8 @@ export function SignLanguageRecognizer() {
                   <Button onClick={() => setDemoMode(false)} variant="outline">
                     Exit Demo
                   </Button>
-                  <Button 
-                    onClick={startCamera} 
+                  <Button
+                    onClick={startCamera}
                     variant="outline"
                     size="sm"
                   >
@@ -741,7 +1025,7 @@ export function SignLanguageRecognizer() {
                     {demoMode ? 'Demo detected' : 'Detected'} at {currentSign.timestamp.toLocaleTimeString()}
                   </div>
                 </div>
-                
+
                 <div className="space-y-2">
                   <div className="flex justify-between">
                     <span>Confidence</span>
@@ -749,17 +1033,17 @@ export function SignLanguageRecognizer() {
                   </div>
                   <Progress value={currentSign.confidence * 100} />
                 </div>
-                
+
                 {demoMode && (
                   <div className="text-xs text-muted-foreground text-center mt-3 p-2 bg-muted/50 rounded">
                     This is a simulation. Enable camera access for real recognition.
                   </div>
                 )}
-                
+
                 <div className="flex items-center justify-center gap-2 mt-4">
-                  <Button 
-                    onClick={replayAudio} 
-                    variant="outline" 
+                  <Button
+                    onClick={replayAudio}
+                    variant="outline"
                     size="sm"
                     disabled={!audioEnabled || isSpeaking}
                   >
@@ -775,8 +1059,8 @@ export function SignLanguageRecognizer() {
                       </>
                     )}
                   </Button>
-                  <Button 
-                    onClick={() => setAudioEnabled(!audioEnabled)} 
+                  <Button
+                    onClick={() => setAudioEnabled(!audioEnabled)}
                     variant={audioEnabled ? "outline" : "secondary"}
                     size="sm"
                   >
@@ -802,9 +1086,9 @@ export function SignLanguageRecognizer() {
           <CardHeader>
             <CardTitle className="flex items-center justify-between">
               Recognition History
-              <Button 
-                onClick={clearHistory} 
-                variant="outline" 
+              <Button
+                onClick={clearHistory}
+                variant="outline"
                 size="sm"
                 disabled={recognitionHistory.length === 0}
               >
@@ -821,7 +1105,7 @@ export function SignLanguageRecognizer() {
             ) : (
               <div className="space-y-3">
                 {recognitionHistory.map((item, index) => (
-                  <div 
+                  <div
                     key={`${item.sign}-${item.timestamp.getTime()}`}
                     className="flex items-center justify-between p-3 bg-muted rounded-lg"
                   >

@@ -1,4 +1,4 @@
-import { Camera, Settings, History, BookOpen, User, Home, Scan, X, AlertCircle, ArrowLeft } from "lucide-react";
+import { Camera, Settings, History, BookOpen, User, Home, Scan, X, AlertCircle, ArrowLeft, Brain, Grid3X3, BarChart3 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Card } from "./components/ui/card";
 import { useState, useRef, useEffect } from "react";
@@ -7,8 +7,12 @@ import { SignLanguageRecognizer } from "./components/SignLanguageRecognizer";
 import { LearnSection } from "./components/LearnSection";
 import { ProfileSection } from "./components/ProfileSection";
 import { SettingsSection } from "./components/SettingsSection";
+import { TrainingPanel } from "./components/TrainingPanel";
+import { GlossaryGrid } from "./components/GlossaryGrid";
+import { BenchmarkDashboard } from "./components/BenchmarkDashboard";
+import { ResearchDashboard } from "./components/ResearchDashboard";
 
-type Section = 'home' | 'camera' | 'learn' | 'profile' | 'settings';
+type Section = 'home' | 'camera' | 'learn' | 'profile' | 'settings' | 'training' | 'glossary' | 'benchmark' | 'research';
 
 export default function App() {
   const [currentSection, setCurrentSection] = useState<Section>('home');
@@ -19,7 +23,11 @@ export default function App() {
       camera: 'Sign Recognition',
       learn: 'Learn Sign Language',
       profile: 'Your Profile',
-      settings: 'Settings'
+      settings: 'Settings',
+      training: 'Training Panel',
+      glossary: 'Sign Glossary',
+      benchmark: 'Benchmark Dashboard',
+      research: 'Research Dashboard',
     };
 
     return (
@@ -27,8 +35,8 @@ export default function App() {
         <div className="max-w-4xl mx-auto">
           {/* Header */}
           <div className="flex items-center justify-between mb-6">
-            <Button 
-              variant="ghost" 
+            <Button
+              variant="ghost"
               onClick={() => setCurrentSection('home')}
               className="flex items-center gap-2"
             >
@@ -38,8 +46,8 @@ export default function App() {
             <h1 className="text-2xl text-gray-800">
               {sectionTitles[currentSection as keyof typeof sectionTitles]}
             </h1>
-            <Button 
-              variant="ghost" 
+            <Button
+              variant="ghost"
               size="icon"
               onClick={() => setCurrentSection('settings')}
             >
@@ -52,6 +60,10 @@ export default function App() {
           {currentSection === 'learn' && <LearnSection />}
           {currentSection === 'profile' && <ProfileSection />}
           {currentSection === 'settings' && <SettingsSection />}
+          {currentSection === 'training' && <TrainingPanel />}
+          {currentSection === 'glossary' && <GlossaryGrid />}
+          {currentSection === 'benchmark' && <BenchmarkDashboard />}
+          {currentSection === 'research' && <ResearchDashboard />}
         </div>
       </div>
     );
@@ -82,26 +94,26 @@ export default function App() {
                   {/* SignBridge Logo */}
                   <svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
                     {/* Orange Person */}
-                    <circle cx="35" cy="20" r="8" fill="#FFA500"/>
-                    <path d="M35 30L25 45V60M35 30L45 45V60M35 35L20 50M35 35L50 50" stroke="#FFA500" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
-                    
+                    <circle cx="35" cy="20" r="8" fill="#FFA500" />
+                    <path d="M35 30L25 45V60M35 30L45 45V60M35 35L20 50M35 35L50 50" stroke="#FFA500" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+
                     {/* Blue Person */}
-                    <circle cx="65" cy="20" r="8" fill="#00A8E8"/>
-                    <path d="M65 30L55 45V60M65 30L75 45V60M65 35L50 50M65 35L80 50" stroke="#00A8E8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
-                    
+                    <circle cx="65" cy="20" r="8" fill="#00A8E8" />
+                    <path d="M65 30L55 45V60M65 30L75 45V60M65 35L50 50M65 35L80 50" stroke="#00A8E8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+
                     {/* Connecting Bridge */}
-                    <line x1="35" y1="50" x2="65" y2="50" stroke="#FFA500" strokeWidth="3" strokeLinecap="round"/>
-                    <circle cx="35" cy="50" r="4" fill="#FFA500"/>
-                    <circle cx="65" cy="50" r="4" fill="#00A8E8"/>
+                    <line x1="35" y1="50" x2="65" y2="50" stroke="#FFA500" strokeWidth="3" strokeLinecap="round" />
+                    <circle cx="35" cy="50" r="4" fill="#FFA500" />
+                    <circle cx="65" cy="50" r="4" fill="#00A8E8" />
                   </svg>
                   <div>
                     <h1 className="text-white text-2xl font-bold">SignBridge</h1>
                     <p className="text-blue-100 text-xs">Breaking barriers</p>
                   </div>
                 </div>
-                <Button 
-                  variant="ghost" 
-                  size="icon" 
+                <Button
+                  variant="ghost"
+                  size="icon"
                   className="text-white hover:bg-white/20"
                   onClick={() => setCurrentSection('settings')}
                 >
@@ -124,7 +136,7 @@ export default function App() {
                     <Camera className="w-8 h-8 text-white" />
                   </div>
                 </div>
-                <Button 
+                <Button
                   className="w-full mt-4 bg-white text-indigo-600 hover:bg-indigo-50"
                   onClick={() => setCurrentSection('camera')}
                 >
@@ -135,7 +147,7 @@ export default function App() {
 
               {/* Quick Actions Grid */}
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <Card 
+                <Card
                   className="p-4 hover:shadow-md transition-shadow cursor-pointer"
                   onClick={() => setCurrentSection('learn')}
                 >
@@ -146,7 +158,7 @@ export default function App() {
                   <p className="text-gray-500 text-xs">View past translations</p>
                 </Card>
 
-                <Card 
+                <Card
                   className="p-4 hover:shadow-md transition-shadow cursor-pointer"
                   onClick={() => setCurrentSection('learn')}
                 >
@@ -158,7 +170,49 @@ export default function App() {
                 </Card>
               </div>
 
-              {/* Recent Activity */}
+              {/* ML & Research Actions */}
+              <div className="grid grid-cols-4 gap-3 mb-4">
+                <Card
+                  className="p-3 hover:shadow-md transition-shadow cursor-pointer"
+                  onClick={() => setCurrentSection('training')}
+                >
+                  <div className="bg-purple-100 w-10 h-10 rounded-full flex items-center justify-center mb-2">
+                    <Brain className="w-5 h-5 text-purple-600" />
+                  </div>
+                  <h3 className="text-xs mb-0.5">Train</h3>
+                  <p className="text-gray-500" style={{ fontSize: '10px' }}>ML Model</p>
+                </Card>
+                <Card
+                  className="p-3 hover:shadow-md transition-shadow cursor-pointer"
+                  onClick={() => setCurrentSection('glossary')}
+                >
+                  <div className="bg-teal-100 w-10 h-10 rounded-full flex items-center justify-center mb-2">
+                    <Grid3X3 className="w-5 h-5 text-teal-600" />
+                  </div>
+                  <h3 className="text-xs mb-0.5">Glossary</h3>
+                  <p className="text-gray-500" style={{ fontSize: '10px' }}>All Signs</p>
+                </Card>
+                <Card
+                  className="p-3 hover:shadow-md transition-shadow cursor-pointer"
+                  onClick={() => setCurrentSection('benchmark')}
+                >
+                  <div className="bg-amber-100 w-10 h-10 rounded-full flex items-center justify-center mb-2">
+                    <BarChart3 className="w-5 h-5 text-amber-600" />
+                  </div>
+                  <h3 className="text-xs mb-0.5">Bench</h3>
+                  <p className="text-gray-500" style={{ fontSize: '10px' }}>Metrics</p>
+                </Card>
+                <Card
+                  className="p-3 hover:shadow-md transition-shadow cursor-pointer"
+                  onClick={() => setCurrentSection('research')}
+                >
+                  <div className="bg-indigo-100 w-10 h-10 rounded-full flex items-center justify-center mb-2">
+                    <BarChart3 className="w-5 h-5 text-indigo-600" />
+                  </div>
+                  <h3 className="text-xs mb-0.5">Research</h3>
+                  <p className="text-gray-500" style={{ fontSize: '10px' }}>Dashboard</p>
+                </Card>
+              </div>
               <div className="mb-4">
                 <h3 className="text-sm text-gray-600 mb-3">Recent Translations</h3>
                 <Card className="p-4 mb-2">
@@ -184,36 +238,36 @@ export default function App() {
 
             {/* Bottom Navigation - Fixed to bottom */}
             <div className="bg-white border-t border-gray-200 px-6 py-3 flex items-center justify-around flex-shrink-0">
-              <Button 
-                variant="ghost" 
-                size="icon" 
+              <Button
+                variant="ghost"
+                size="icon"
                 className="flex-col h-auto py-2 text-blue-600"
                 onClick={() => setCurrentSection('home')}
               >
                 <Home className="w-5 h-5 mb-1" />
                 <span className="text-xs">Home</span>
               </Button>
-              <Button 
-                variant="ghost" 
-                size="icon" 
+              <Button
+                variant="ghost"
+                size="icon"
                 className="flex-col h-auto py-2 text-gray-400"
                 onClick={() => setCurrentSection('camera')}
               >
                 <Camera className="w-5 h-5 mb-1" />
                 <span className="text-xs">Camera</span>
               </Button>
-              <Button 
-                variant="ghost" 
-                size="icon" 
+              <Button
+                variant="ghost"
+                size="icon"
                 className="flex-col h-auto py-2 text-gray-400"
                 onClick={() => setCurrentSection('learn')}
               >
                 <BookOpen className="w-5 h-5 mb-1" />
                 <span className="text-xs">Learn</span>
               </Button>
-              <Button 
-                variant="ghost" 
-                size="icon" 
+              <Button
+                variant="ghost"
+                size="icon"
                 className="flex-col h-auto py-2 text-gray-400"
                 onClick={() => setCurrentSection('profile')}
               >
